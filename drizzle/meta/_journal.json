@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1773519743773,
+      "tag": "0000_superb_maria_hill",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1773519815666,
+      "tag": "0001_small_karen_page",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1773604172406,
+      "tag": "0002_rapid_menace",
+      "breakpoints": true
+    }
+  ]
+}

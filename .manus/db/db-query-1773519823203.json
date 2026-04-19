@@ -1,0 +1,9 @@
+{
+  "query": "CREATE TABLE `meetings` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`meetingId` varchar(32) NOT NULL,\n\t`hostId` int NOT NULL,\n\t`title` text,\n\t`status` enum('active','ended') NOT NULL DEFAULT 'active',\n\t`createdAt` timestamp NOT NULL DEFAULT (now()),\n\t`endedAt` timestamp,\n\tCONSTRAINT `meetings_id` PRIMARY KEY(`id`),\n\tCONSTRAINT `meetings_meetingId_unique` UNIQUE(`meetingId`)\n);\nCREATE TABLE `participants` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`meetingId` int NOT NULL,\n\t`userId` int,\n\t`displayName` varchar(255) NOT NULL,\n\t`joinedAt` timestamp NOT NULL DEFAULT (now()),\n\t`leftAt` timestamp,\n\t`audioEnabled` int NOT NULL DEFAULT 1,\n\t`videoEnabled` int NOT NULL DEFAULT 1,\n\tCONSTRAINT `participants_id` PRIMARY KEY(`id`)\n);",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2pcvbi6qe4miTdB.root --database 8eZFTCVJ8gF6YSmtLCjxos --execute CREATE TABLE `meetings` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`meetingId` varchar(32) NOT NULL,\n\t`hostId` int NOT NULL,\n\t`title` text,\n\t`status` enum('active','ended') NOT NULL DEFAULT 'active',\n\t`createdAt` timestamp NOT NULL DEFAULT (now()),\n\t`endedAt` timestamp,\n\tCONSTRAINT `meetings_id` PRIMARY KEY(`id`),\n\tCONSTRAINT `meetings_meetingId_unique` UNIQUE(`meetingId`)\n);\nCREATE TABLE `participants` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`meetingId` int NOT NULL,\n\t`userId` int,\n\t`displayName` varchar(255) NOT NULL,\n\t`joinedAt` timestamp NOT NULL DEFAULT (now()),\n\t`leftAt` timestamp,\n\t`audioEnabled` int NOT NULL DEFAULT 1,\n\t`videoEnabled` int NOT NULL DEFAULT 1,\n\tCONSTRAINT `participants_id` PRIMARY KEY(`id`)\n);",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 741
+}

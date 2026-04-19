@@ -1,0 +1,9 @@
+{
+  "query": "CREATE TABLE `emailVerificationCodes` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`userId` int NOT NULL,\n\t`code` varchar(255) NOT NULL,\n\t`expiresAt` timestamp NOT NULL,\n\t`createdAt` timestamp NOT NULL DEFAULT (now()),\n\tCONSTRAINT `emailVerificationCodes_id` PRIMARY KEY(`id`),\n\tCONSTRAINT `emailVerificationCodes_code_unique` UNIQUE(`code`)\n);\nALTER TABLE `users` MODIFY COLUMN `openId` varchar(64);\nALTER TABLE `users` ADD `passwordHash` text;\nALTER TABLE `users` ADD `emailVerified` boolean DEFAULT false NOT NULL;\nALTER TABLE `users` ADD `emailVerificationToken` varchar(255);\nALTER TABLE `users` ADD CONSTRAINT `users_email_unique` UNIQUE(`email`);",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 2pcvbi6qe4miTdB.root --database 8eZFTCVJ8gF6YSmtLCjxos --execute CREATE TABLE `emailVerificationCodes` (\n\t`id` int AUTO_INCREMENT NOT NULL,\n\t`userId` int NOT NULL,\n\t`code` varchar(255) NOT NULL,\n\t`expiresAt` timestamp NOT NULL,\n\t`createdAt` timestamp NOT NULL DEFAULT (now()),\n\tCONSTRAINT `emailVerificationCodes_id` PRIMARY KEY(`id`),\n\tCONSTRAINT `emailVerificationCodes_code_unique` UNIQUE(`code`)\n);\nALTER TABLE `users` MODIFY COLUMN `openId` varchar(64);\nALTER TABLE `users` ADD `passwordHash` text;\nALTER TABLE `users` ADD `emailVerified` boolean DEFAULT false NOT NULL;\nALTER TABLE `users` ADD `emailVerificationToken` varchar(255);\nALTER TABLE `users` ADD CONSTRAINT `users_email_unique` UNIQUE(`email`);",
+  "rows": [],
+  "messages": [],
+  "stdout": "",
+  "stderr": "",
+  "execution_time_ms": 1806
+}
