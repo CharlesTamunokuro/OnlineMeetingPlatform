@@ -120,6 +120,7 @@ export default function MeetingRoom() {
   const participantCountRef = useRef(1);
   const initializationStartedRef = useRef(false);
   const audioMeterCleanupRef = useRef<(() => void) | null>(null);
+
   // tRPC queries and mutations
   const joinMeetingMutation = trpc.meetings.join.useMutation();
   const leaveMeetingMutation = trpc.meetings.leave.useMutation();
@@ -379,6 +380,7 @@ export default function MeetingRoom() {
           connectionState: "connecting",
         });
         setParticipantCount(message.participantCount ?? Math.max(1, participantCountRef.current + 1));
+
       } else if (message.type === "offer" && message.participantId && message.offer) {
         // Received offer from peer
         const remoteParticipantId = message.participantId;
@@ -419,32 +421,67 @@ export default function MeetingRoom() {
             });
           }
         );
+
       } else if (message.type === "answer" && message.participantId && message.answer) {
         // Received answer from peer
         const remoteParticipantId = message.participantId;
         console.log("Received answer from:", remoteParticipantId);
 
         await webrtcManagerRef.current?.handleAnswer(remoteParticipantId, message.answer);
+
       } else if (message.type === "ice-candidate" && message.participantId && message.candidate) {
         // Received ICE candidate
         await webrtcManagerRef.current?.addIceCandidate(message.participantId, message.candidate);
+
       } else if (message.type === "participant-list") {
-        // Update participant list
+        // Received list of existing participants when joining
         const nextParticipants = (message.participants ?? [])
           .filter(participant => participant.id !== pId)
           .map(participant => ({
             ...participant,
-            connectionState: participantsRef.current.find(existing => existing.id === participant.id)?.connectionState ?? "connecting",
+            connectionState: participantsRef.current.find(
+              existing => existing.id === participant.id
+            )?.connectionState ?? "connecting",
           } satisfies ParticipantInfo));
 
         setParticipants(nextParticipants);
         setParticipantCount(message.participantCount ?? nextParticipants.length + 1);
+
+        // Initiate WebRTC with every existing participant in the room
+        for (const participant of nextParticipants) {
+          // Skip if we already have a connection to this person
+          if (webrtcManagerRef.current?.getRemoteStream(participant.id)) {
+            continue;
+          }
+
+          await webrtcManagerRef.current?.createPeerConnection(
+            participant.id,
+            participant.displayName,
+            true, // we are the initiator since we just joined
+            (offer) => {
+              sendSignal({
+                type: "offer",
+                targetParticipantId: participant.id,
+                offer,
+              });
+            },
+            (candidate) => {
+              sendSignal({
+                type: "ice-candidate",
+                targetParticipantId: participant.id,
+                candidate,
+              });
+            }
+          );
+        }
+
       } else if (message.type === "participant-media-state" && message.participantId) {
         updateParticipantMediaState(
           message.participantId,
           message.audioEnabled ?? true,
           message.videoEnabled ?? true
         );
+
       } else if (message.type === "participant-left" && message.participantId) {
         // Participant left
         webrtcManagerRef.current?.removePeerConnection(message.participantId);
