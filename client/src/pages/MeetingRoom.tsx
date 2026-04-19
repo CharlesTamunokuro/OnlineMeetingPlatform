@@ -120,7 +120,7 @@ export default function MeetingRoom() {
   const participantCountRef = useRef(1);
   const initializationStartedRef = useRef(false);
   const audioMeterCleanupRef = useRef<(() => void) | null>(null);
-  const handleSignalingMessageRef = useRef<((message: SignalingMessage, pId: number) => Promise<void>) | null>(null);
+  const handleSignalingMessageRef = useRef<Function | null>(null);
 
   // tRPC queries and mutations
   const joinMeetingMutation = trpc.meetings.join.useMutation();
@@ -310,45 +310,6 @@ export default function MeetingRoom() {
     void attachLocalPreview(localStream);
   }, [attachLocalPreview, localStream]);
 
-  // Initialize WebSocket signaling
-  const initializeSignaling = useCallback((
-    pId: number,
-    participantDisplayName: string,
-    currentAudioEnabled: boolean,
-    currentVideoEnabled: boolean
-  ) => {
-    wsRef.current?.close();
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        type: "join",
-        meetingId,
-        participantId: pId,
-        displayName: participantDisplayName,
-        audioEnabled: currentAudioEnabled,
-        videoEnabled: currentVideoEnabled,
-      } satisfies SignalingMessage));
-    };
-
-    ws.onmessage = async (event) => {
-      const message = JSON.parse(event.data) as SignalingMessage;
-      // Use ref to always call the latest version, avoiding stale closure bug
-      await (handleSignalingMessageRef.current ?? handleSignalingMessage)(message, pId);
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-    };
-
-    ws.onclose = () => {
-      console.log("WebSocket closed");
-    };
-
-    wsRef.current = ws;
-  }, [meetingId]);
-
   // Handle signaling messages
   const handleSignalingMessage = useCallback(async (message: SignalingMessage, pId: number) => {
     try {
@@ -498,6 +459,49 @@ export default function MeetingRoom() {
       console.error("Error handling signaling message:", error);
     }
   }, [sendSignal, updateParticipantMediaState, upsertParticipant]);
+
+  // Initialize WebSocket signaling
+  const initializeSignaling = useCallback((
+    pId: number,
+    participantDisplayName: string,
+    currentAudioEnabled: boolean,
+    currentVideoEnabled: boolean
+  ) => {
+    wsRef.current?.close();
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/ws`);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        type: "join",
+        meetingId,
+        participantId: pId,
+        displayName: participantDisplayName,
+        audioEnabled: currentAudioEnabled,
+        videoEnabled: currentVideoEnabled,
+      } satisfies SignalingMessage));
+    };
+
+    ws.onmessage = async (event) => {
+      const message = JSON.parse(event.data) as SignalingMessage;
+      // Always call via ref — avoids stale closure and circular dependency
+      if (handleSignalingMessageRef.current) {
+        await handleSignalingMessageRef.current(message, pId);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    ws.onclose = () => {
+      console.log("WebSocket closed");
+    };
+
+    wsRef.current = ws;
+  }, [meetingId]);
+
+
 
   // Initialize meeting
   useEffect(() => {
