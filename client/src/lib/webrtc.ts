@@ -166,7 +166,11 @@ export class WebRTCManager {
 
     // Handle remote stream
     peerConnection.ontrack = (event) => {
-      const remoteStream = event.streams[0];
+      // Use existing stream from event, or fall back to a new one containing the track
+      const remoteStream = event.streams[0] ?? new MediaStream([event.track]);
+
+      // Attach immediately so the video element gets the stream right away
+      this.upsertRemoteStream(remoteParticipantId, displayName, peerConnection, remoteStream, event.track);
 
       event.track.onmute = () => {
         this.upsertRemoteStream(remoteParticipantId, displayName, peerConnection, remoteStream, event.track);
@@ -177,8 +181,6 @@ export class WebRTCManager {
       event.track.onended = () => {
         this.upsertRemoteStream(remoteParticipantId, displayName, peerConnection, remoteStream);
       };
-
-      this.upsertRemoteStream(remoteParticipantId, displayName, peerConnection, remoteStream, event.track);
     };
 
     // Handle ICE candidates

@@ -120,6 +120,7 @@ export default function MeetingRoom() {
   const participantCountRef = useRef(1);
   const initializationStartedRef = useRef(false);
   const audioMeterCleanupRef = useRef<(() => void) | null>(null);
+  const handleSignalingMessageRef = useRef<((message: SignalingMessage, pId: number) => Promise<void>) | null>(null);
 
   // tRPC queries and mutations
   const joinMeetingMutation = trpc.meetings.join.useMutation();
@@ -293,6 +294,10 @@ export default function MeetingRoom() {
   }, [joinMeetingMutation]);
 
   useEffect(() => {
+    handleSignalingMessageRef.current = handleSignalingMessage;
+  }, [handleSignalingMessage]);
+
+  useEffect(() => {
     participantsRef.current = participants;
   }, [participants]);
 
@@ -329,7 +334,8 @@ export default function MeetingRoom() {
 
     ws.onmessage = async (event) => {
       const message = JSON.parse(event.data) as SignalingMessage;
-      await handleSignalingMessage(message, pId);
+      // Use ref to always call the latest version, avoiding stale closure bug
+      await (handleSignalingMessageRef.current ?? handleSignalingMessage)(message, pId);
     };
 
     ws.onerror = (error) => {
