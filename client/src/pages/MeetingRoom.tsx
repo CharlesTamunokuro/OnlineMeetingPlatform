@@ -57,20 +57,13 @@ interface SignalingMessage {
 
 function getConnectionLabel(connectionState: ParticipantConnectionState) {
   switch (connectionState) {
-    case "connected":
-      return "Connected";
-    case "connecting":
-      return "Connecting";
-    case "disconnected":
-      return "Reconnecting";
-    case "failed":
-      return "Connection issue";
-    case "closed":
-      return "Disconnected";
-    case "new":
-      return "Connecting";
-    default:
-      return "Checking media";
+    case "connected": return "Connected";
+    case "connecting": return "Connecting";
+    case "disconnected": return "Reconnecting";
+    case "failed": return "Connection issue";
+    case "closed": return "Disconnected";
+    case "new": return "Connecting";
+    default: return "Checking media";
   }
 }
 
@@ -86,7 +79,6 @@ export default function MeetingRoom() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const [, setLocation] = useLocation();
 
-  // Local state
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [audioEnabled, setAudioEnabled] = useState(true);
   const [videoEnabled, setVideoEnabled] = useState(true);
@@ -111,7 +103,7 @@ export default function MeetingRoom() {
     videoTrackLabel: "",
   });
 
-  // Refs
+  // ── Refs ──────────────────────────────────────────────────────────────────
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const webrtcManagerRef = useRef<WebRTCManager | null>(null);
@@ -120,21 +112,30 @@ export default function MeetingRoom() {
   const participantCountRef = useRef(1);
   const initializationStartedRef = useRef(false);
   const audioMeterCleanupRef = useRef<(() => void) | null>(null);
-  const handleSignalingMessageRef = useRef<Function | null>(null);
 
-  // tRPC queries and mutations
+  // Stable state-setter refs — used inside signalingHandlerRef to avoid
+  // capturing stale closures without creating circular useCallback chains
+  const setParticipantsRef = useRef(setParticipants);
+  const setParticipantCountRef = useRef(setParticipantCount);
+  const setRemoteStreamsRef = useRef(setRemoteStreams);
+  useEffect(() => { setParticipantsRef.current = setParticipants; });
+  useEffect(() => { setParticipantCountRef.current = setParticipantCount; });
+  useEffect(() => { setRemoteStreamsRef.current = setRemoteStreams; });
+
+  // ── tRPC ──────────────────────────────────────────────────────────────────
   const joinMeetingMutation = trpc.meetings.join.useMutation();
   const leaveMeetingMutation = trpc.meetings.leave.useMutation();
   const updateAudioMutation = trpc.meetings.updateAudio.useMutation();
   const updateVideoMutation = trpc.meetings.updateVideo.useMutation();
   const joinMeetingMutationRef = useRef(joinMeetingMutation);
+  useEffect(() => { joinMeetingMutationRef.current = joinMeetingMutation; }, [joinMeetingMutation]);
+  useEffect(() => { participantsRef.current = participants; }, [participants]);
+  useEffect(() => { participantCountRef.current = participantCount; }, [participantCount]);
 
+  // ── Local video preview ───────────────────────────────────────────────────
   const attachLocalPreview = useCallback(async (stream: MediaStream | null) => {
     const videoElement = localVideoRef.current;
-    if (!videoElement || !stream) {
-      return;
-    }
-
+    if (!videoElement || !stream) return;
     videoElement.srcObject = null;
     videoElement.srcObject = stream;
     videoElement.muted = true;
@@ -143,61 +144,48 @@ export default function MeetingRoom() {
     videoElement.autoplay = true;
     videoElement.playsInline = true;
     videoElement.setAttribute("playsinline", "true");
-
-    try {
-      await videoElement.play();
-    } catch (error) {
+    try { await videoElement.play(); } catch (error) {
       console.warn("Local preview autoplay was blocked:", error);
     }
   }, []);
 
+  useEffect(() => {
+    localStreamRef.current = localStream;
+    void attachLocalPreview(localStream);
+  }, [attachLocalPreview, localStream]);
+
+  // ── Audio meter ───────────────────────────────────────────────────────────
   const startAudioMeter = useCallback(async (stream: MediaStream | null) => {
     audioMeterCleanupRef.current?.();
     audioMeterCleanupRef.current = null;
-
     if (!stream || stream.getAudioTracks().length === 0) {
       setMediaStatus(prev => ({ ...prev, audioLevel: 0 }));
       return;
     }
-
     const AudioContextClass = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-    if (!AudioContextClass) {
-      return;
-    }
-
+    if (!AudioContextClass) return;
     const audioContext = new AudioContextClass();
     if (audioContext.state === "suspended") {
-      try {
-        await audioContext.resume();
-      } catch (error) {
-        console.warn("Unable to resume audio context:", error);
-      }
+      try { await audioContext.resume(); } catch (e) { console.warn("Audio context resume failed:", e); }
     }
-
     const analyser = audioContext.createAnalyser();
     analyser.fftSize = 512;
     const source = audioContext.createMediaStreamSource(stream);
     source.connect(analyser);
     const data = new Uint8Array(analyser.frequencyBinCount);
     let rafId = 0;
-
     const updateLevel = () => {
       analyser.getByteTimeDomainData(data);
-
       let sum = 0;
-      for (let i = 0; i < data.length; i += 1) {
-        const normalized = (data[i] - 128) / 128;
-        sum += normalized * normalized;
+      for (let i = 0; i < data.length; i++) {
+        const n = (data[i] - 128) / 128;
+        sum += n * n;
       }
-
-      const rms = Math.sqrt(sum / data.length);
-      const level = Math.min(100, Math.round(rms * 280));
+      const level = Math.min(100, Math.round(Math.sqrt(sum / data.length) * 280));
       setMediaStatus(prev => ({ ...prev, audioLevel: level }));
       rafId = window.requestAnimationFrame(updateLevel);
     };
-
     updateLevel();
-
     audioMeterCleanupRef.current = () => {
       window.cancelAnimationFrame(rafId);
       source.disconnect();
@@ -206,261 +194,158 @@ export default function MeetingRoom() {
     };
   }, []);
 
-  const upsertParticipant = useCallback((nextParticipant: ParticipantInfo) => {
-    setParticipants(prev => {
-      const existingParticipant = prev.find(participant => participant.id === nextParticipant.id);
-
-      if (!existingParticipant) {
-        return [...prev, nextParticipant];
-      }
-
-      return prev.map(participant => (
-        participant.id === nextParticipant.id
-          ? { ...participant, ...nextParticipant }
-          : participant
-      ));
+  // ── WebRTC stream callbacks ───────────────────────────────────────────────
+  const handleRemoteStreamAdded = useCallback((stream: RemoteStreamInfo) => {
+    console.log("Remote stream added:", stream.participantId);
+    setRemoteStreams(prev => {
+      const exists = prev.find(r => r.participantId === stream.participantId);
+      return exists
+        ? prev.map(r => r.participantId === stream.participantId ? stream : r)
+        : [...prev, stream];
     });
+    setParticipants(prev => prev.map(p =>
+      p.id === stream.participantId
+        ? { ...p, displayName: stream.displayName, connectionState: "connected" }
+        : p
+    ));
   }, []);
 
-  const updateParticipantMediaState = useCallback((targetParticipantId: number, audioState: boolean, videoState: boolean) => {
-    setParticipants(prev => prev.map(participant => (
-      participant.id === targetParticipantId
-        ? {
-            ...participant,
-            audioEnabled: audioState,
-            videoEnabled: videoState,
-          }
-        : participant
-    )));
+  const handleRemoteStreamRemoved = useCallback((targetParticipantId: number) => {
+    console.log("Remote stream removed:", targetParticipantId);
+    setRemoteStreams(prev => prev.filter(r => r.participantId !== targetParticipantId));
+    setParticipants(prev => prev.map(p =>
+      p.id === targetParticipantId ? { ...p, connectionState: "disconnected" } : p
+    ));
   }, []);
 
+  const handleConnectionStateChanged = useCallback((targetParticipantId: number, state: RTCPeerConnectionState) => {
+    console.log(`Connection state changed for ${targetParticipantId}:`, state);
+    setParticipants(prev => prev.map(p =>
+      p.id === targetParticipantId ? { ...p, connectionState: state } : p
+    ));
+  }, []);
+
+  // ── Signaling send helper ─────────────────────────────────────────────────
   const sendSignal = useCallback((message: SignalingMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(message));
     }
   }, []);
 
-  const broadcastMediaState = useCallback((nextAudioEnabled: boolean, nextVideoEnabled: boolean) => {
-    sendSignal({
-      type: "participant-media-state",
-      audioEnabled: nextAudioEnabled,
-      videoEnabled: nextVideoEnabled,
-    });
+  const broadcastMediaState = useCallback((nextAudio: boolean, nextVideo: boolean) => {
+    sendSignal({ type: "participant-media-state", audioEnabled: nextAudio, videoEnabled: nextVideo });
   }, [sendSignal]);
 
-  // Initialize WebRTC manager callbacks
-  const handleRemoteStreamAdded = useCallback((stream: RemoteStreamInfo) => {
-    console.log("Remote stream added:", stream.participantId);
-    setRemoteStreams(prev => {
-      const existingRemoteStream = prev.find(remote => remote.participantId === stream.participantId);
-
-      if (!existingRemoteStream) {
-        return [...prev, stream];
+  // ── Core signaling handler — plain ref, zero circular useCallback deps ────
+  // This is the key fix: using useRef with a plain async function instead of
+  // useCallback eliminates the circular dependency that caused the
+  // "Cannot access before initialization" bundle error in production.
+  const signalingHandlerRef = useRef(async (message: SignalingMessage, pId: number) => {
+    // Local send helper — no closure capture needed
+    const send = (msg: SignalingMessage) => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(msg));
       }
+    };
 
-      return prev.map(remote => (
-        remote.participantId === stream.participantId ? stream : remote
-      ));
-    });
-
-    setParticipants(prev => prev.map(participant => (
-      participant.id === stream.participantId
-        ? { ...participant, displayName: stream.displayName, connectionState: "connected" }
-        : participant
-    )));
-  }, []);
-
-  const handleRemoteStreamRemoved = useCallback((targetParticipantId: number) => {
-    console.log("Remote stream removed:", targetParticipantId);
-    setRemoteStreams(prev => prev.filter(remote => remote.participantId !== targetParticipantId));
-    setParticipants(prev => prev.map(participant => (
-      participant.id === targetParticipantId
-        ? { ...participant, connectionState: "disconnected" }
-        : participant
-    )));
-  }, []);
-
-  const handleConnectionStateChanged = useCallback((targetParticipantId: number, state: RTCPeerConnectionState) => {
-    console.log(`Connection state changed for ${targetParticipantId}:`, state);
-    setParticipants(prev => prev.map(participant => (
-      participant.id === targetParticipantId
-        ? { ...participant, connectionState: state }
-        : participant
-    )));
-  }, []);
-
-  useEffect(() => {
-    joinMeetingMutationRef.current = joinMeetingMutation;
-  }, [joinMeetingMutation]);
-
-  useEffect(() => {
-    handleSignalingMessageRef.current = handleSignalingMessage;
-  }, [handleSignalingMessage]);
-
-  useEffect(() => {
-    participantsRef.current = participants;
-  }, [participants]);
-
-  useEffect(() => {
-    participantCountRef.current = participantCount;
-  }, [participantCount]);
-
-  useEffect(() => {
-    localStreamRef.current = localStream;
-    void attachLocalPreview(localStream);
-  }, [attachLocalPreview, localStream]);
-
-  // Handle signaling messages
-  const handleSignalingMessage = useCallback(async (message: SignalingMessage, pId: number) => {
     try {
       if (message.type === "participant-joined" && message.participantId) {
-        // New participant joined, create peer connection as initiator
-        const remoteParticipantId = message.participantId;
-        const remoteDisplayName = message.displayName || `Participant ${remoteParticipantId}`;
-        console.log("Participant joined:", remoteParticipantId);
+        const remoteId = message.participantId;
+        const remoteName = message.displayName || `Participant ${remoteId}`;
+        console.log("Participant joined:", remoteId);
 
         await webrtcManagerRef.current?.createPeerConnection(
-          remoteParticipantId,
-          remoteDisplayName,
-          true,
-          (offer) => {
-            sendSignal({
-              type: "offer",
-              targetParticipantId: remoteParticipantId,
-              offer,
-            });
-          },
-          (candidate) => {
-            sendSignal({
-              type: "ice-candidate",
-              targetParticipantId: remoteParticipantId,
-              candidate,
-            });
-          }
+          remoteId, remoteName, true,
+          (offer) => send({ type: "offer", targetParticipantId: remoteId, offer }),
+          (candidate) => send({ type: "ice-candidate", targetParticipantId: remoteId, candidate })
         );
 
-        upsertParticipant({
-          id: remoteParticipantId,
-          displayName: remoteDisplayName,
-          audioEnabled: message.audioEnabled ?? true,
-          videoEnabled: message.videoEnabled ?? true,
-          connectionState: "connecting",
+        setParticipantsRef.current(prev => {
+          const next: ParticipantInfo = {
+            id: remoteId,
+            displayName: remoteName,
+            audioEnabled: message.audioEnabled ?? true,
+            videoEnabled: message.videoEnabled ?? true,
+            connectionState: "connecting",
+          };
+          const exists = prev.find(p => p.id === remoteId);
+          return exists ? prev.map(p => p.id === remoteId ? { ...p, ...next } : p) : [...prev, next];
         });
-        setParticipantCount(message.participantCount ?? Math.max(1, participantCountRef.current + 1));
+        setParticipantCountRef.current(prev => message.participantCount ?? Math.max(1, prev + 1));
 
       } else if (message.type === "offer" && message.participantId && message.offer) {
-        // Received offer from peer
-        const remoteParticipantId = message.participantId;
-        const remoteDisplayName = message.displayName || `Participant ${remoteParticipantId}`;
-        console.log("Received offer from:", remoteParticipantId);
+        const remoteId = message.participantId;
+        const remoteName = message.displayName || `Participant ${remoteId}`;
+        console.log("Received offer from:", remoteId);
 
-        upsertParticipant({
-          id: remoteParticipantId,
-          displayName: remoteDisplayName,
-          audioEnabled: message.audioEnabled ?? true,
-          videoEnabled: message.videoEnabled ?? true,
-          connectionState: "connecting",
+        setParticipantsRef.current(prev => {
+          const next: ParticipantInfo = {
+            id: remoteId,
+            displayName: remoteName,
+            audioEnabled: message.audioEnabled ?? true,
+            videoEnabled: message.videoEnabled ?? true,
+            connectionState: "connecting",
+          };
+          const exists = prev.find(p => p.id === remoteId);
+          return exists ? prev.map(p => p.id === remoteId ? { ...p, ...next } : p) : [...prev, next];
         });
 
         await webrtcManagerRef.current?.handleOffer(
-          remoteParticipantId,
-          remoteDisplayName,
-          message.offer,
-          (answer) => {
-            sendSignal({
-              type: "answer",
-              targetParticipantId: remoteParticipantId,
-              answer,
-            });
-          },
-          (candidate) => {
-            sendSignal({
-              type: "ice-candidate",
-              targetParticipantId: remoteParticipantId,
-              candidate,
-            });
-          },
-          (offer) => {
-            sendSignal({
-              type: "offer",
-              targetParticipantId: remoteParticipantId,
-              offer,
-            });
-          }
+          remoteId, remoteName, message.offer,
+          (answer) => send({ type: "answer", targetParticipantId: remoteId, answer }),
+          (candidate) => send({ type: "ice-candidate", targetParticipantId: remoteId, candidate }),
+          (offer) => send({ type: "offer", targetParticipantId: remoteId, offer })
         );
 
       } else if (message.type === "answer" && message.participantId && message.answer) {
-        // Received answer from peer
-        const remoteParticipantId = message.participantId;
-        console.log("Received answer from:", remoteParticipantId);
-
-        await webrtcManagerRef.current?.handleAnswer(remoteParticipantId, message.answer);
+        console.log("Received answer from:", message.participantId);
+        await webrtcManagerRef.current?.handleAnswer(message.participantId, message.answer);
 
       } else if (message.type === "ice-candidate" && message.participantId && message.candidate) {
-        // Received ICE candidate
         await webrtcManagerRef.current?.addIceCandidate(message.participantId, message.candidate);
 
       } else if (message.type === "participant-list") {
-        // Received list of existing participants when joining
-        const nextParticipants = (message.participants ?? [])
-          .filter(participant => participant.id !== pId)
-          .map(participant => ({
-            ...participant,
-            connectionState: participantsRef.current.find(
-              existing => existing.id === participant.id
-            )?.connectionState ?? "connecting",
-          } satisfies ParticipantInfo));
+        const nextParticipants: ParticipantInfo[] = (message.participants ?? [])
+          .filter(p => p.id !== pId)
+          .map(p => ({
+            ...p,
+            connectionState: (
+              participantsRef.current.find(e => e.id === p.id)?.connectionState ?? "connecting"
+            ) as ParticipantConnectionState,
+          }));
 
-        setParticipants(nextParticipants);
-        setParticipantCount(message.participantCount ?? nextParticipants.length + 1);
+        setParticipantsRef.current(nextParticipants);
+        setParticipantCountRef.current(message.participantCount ?? nextParticipants.length + 1);
 
-        // Initiate WebRTC with every existing participant in the room
+        // Initiate WebRTC with all existing participants
         for (const participant of nextParticipants) {
-          // Skip if we already have a connection to this person
-          if (webrtcManagerRef.current?.getRemoteStream(participant.id)) {
-            continue;
-          }
-
+          if (webrtcManagerRef.current?.getRemoteStream(participant.id)) continue;
           await webrtcManagerRef.current?.createPeerConnection(
-            participant.id,
-            participant.displayName,
-            true, // we are the initiator since we just joined
-            (offer) => {
-              sendSignal({
-                type: "offer",
-                targetParticipantId: participant.id,
-                offer,
-              });
-            },
-            (candidate) => {
-              sendSignal({
-                type: "ice-candidate",
-                targetParticipantId: participant.id,
-                candidate,
-              });
-            }
+            participant.id, participant.displayName, true,
+            (offer) => send({ type: "offer", targetParticipantId: participant.id, offer }),
+            (candidate) => send({ type: "ice-candidate", targetParticipantId: participant.id, candidate })
           );
         }
 
       } else if (message.type === "participant-media-state" && message.participantId) {
-        updateParticipantMediaState(
-          message.participantId,
-          message.audioEnabled ?? true,
-          message.videoEnabled ?? true
-        );
+        const tid = message.participantId;
+        setParticipantsRef.current(prev => prev.map(p =>
+          p.id === tid
+            ? { ...p, audioEnabled: message.audioEnabled ?? true, videoEnabled: message.videoEnabled ?? true }
+            : p
+        ));
 
       } else if (message.type === "participant-left" && message.participantId) {
-        // Participant left
         webrtcManagerRef.current?.removePeerConnection(message.participantId);
-        setParticipants(prev => prev.filter(participant => participant.id !== message.participantId));
-        setParticipantCount(message.participantCount ?? Math.max(1, participantCountRef.current - 1));
+        setParticipantsRef.current(prev => prev.filter(p => p.id !== message.participantId));
+        setParticipantCountRef.current(prev => message.participantCount ?? Math.max(1, prev - 1));
       }
     } catch (error) {
       console.error("Error handling signaling message:", error);
     }
-  }, [sendSignal, updateParticipantMediaState, upsertParticipant]);
+  });
 
-  // Initialize WebSocket signaling
+  // ── WebSocket initialization ──────────────────────────────────────────────
   const initializeSignaling = useCallback((
     pId: number,
     participantDisplayName: string,
@@ -484,67 +369,39 @@ export default function MeetingRoom() {
 
     ws.onmessage = async (event) => {
       const message = JSON.parse(event.data) as SignalingMessage;
-      // Always call via ref — avoids stale closure and circular dependency
-      if (handleSignalingMessageRef.current) {
-        await handleSignalingMessageRef.current(message, pId);
-      }
+      await signalingHandlerRef.current(message, pId);
     };
 
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-    };
-
-    ws.onclose = () => {
-      console.log("WebSocket closed");
-    };
-
+    ws.onerror = (error) => { console.error("WebSocket error:", error); };
+    ws.onclose = () => { console.log("WebSocket closed"); };
     wsRef.current = ws;
   }, [meetingId]);
 
-
-
-  // Initialize meeting
+  // ── Meeting initialization ────────────────────────────────────────────────
   useEffect(() => {
-    if (!meetingId || participantId !== null || initializationStartedRef.current) {
-      return;
-    }
+    if (!meetingId || participantId !== null || initializationStartedRef.current) return;
 
     let cancelled = false;
 
     const initializeMeeting = async () => {
       try {
         setIsLoading(true);
-
         const preferredDisplayName = getFallbackDisplayName(meetingId);
         setDisplayName(preferredDisplayName);
 
-        // Request user media
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280, max: 1920 },
-            height: { ideal: 720, max: 1080 },
-            frameRate: { ideal: 30, max: 30 },
-            facingMode: "user",
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-            channelCount: 1,
-          },
+          video: { width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 }, frameRate: { ideal: 30, max: 30 }, facingMode: "user" },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
         });
 
-        if (cancelled) {
-          stream.getTracks().forEach(track => track.stop());
-          return;
-        }
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
 
         const videoTracks = stream.getVideoTracks();
         const audioTracks = stream.getAudioTracks();
         const hasVideoTrack = videoTracks.length > 0;
         const hasAudioTrack = audioTracks.length > 0;
-        const localVideoEnabled = hasVideoTrack && videoTracks.some(track => track.enabled);
-        const localAudioEnabled = hasAudioTrack && audioTracks.some(track => track.enabled);
+        const localVideoEnabled = hasVideoTrack && videoTracks.some(t => t.enabled);
+        const localAudioEnabled = hasAudioTrack && audioTracks.some(t => t.enabled);
         const primaryVideoTrack = videoTracks[0] ?? null;
 
         setMediaStatus({
@@ -566,18 +423,11 @@ export default function MeetingRoom() {
         await startAudioMeter(stream);
 
         if (primaryVideoTrack) {
-          primaryVideoTrack.onmute = () => {
-            setMediaStatus(prev => ({ ...prev, videoTrackMuted: true, videoTrackReadyState: primaryVideoTrack.readyState }));
-          };
-          primaryVideoTrack.onunmute = () => {
-            setMediaStatus(prev => ({ ...prev, videoTrackMuted: false, videoTrackReadyState: primaryVideoTrack.readyState }));
-          };
-          primaryVideoTrack.onended = () => {
-            setMediaStatus(prev => ({ ...prev, videoTrackReadyState: primaryVideoTrack.readyState }));
-          };
+          primaryVideoTrack.onmute = () => setMediaStatus(prev => ({ ...prev, videoTrackMuted: true, videoTrackReadyState: primaryVideoTrack.readyState }));
+          primaryVideoTrack.onunmute = () => setMediaStatus(prev => ({ ...prev, videoTrackMuted: false, videoTrackReadyState: primaryVideoTrack.readyState }));
+          primaryVideoTrack.onended = () => setMediaStatus(prev => ({ ...prev, videoTrackReadyState: primaryVideoTrack.readyState }));
         }
 
-        // Initialize WebRTC manager
         webrtcManagerRef.current = new WebRTCManager(
           handleRemoteStreamAdded,
           handleRemoteStreamRemoved,
@@ -585,32 +435,17 @@ export default function MeetingRoom() {
         );
         await webrtcManagerRef.current.setLocalStream(stream);
 
-        // Join meeting once per page load
-        const result = await joinMeetingMutationRef.current.mutateAsync({
-          meetingId,
-          displayName: preferredDisplayName,
-        });
+        const result = await joinMeetingMutationRef.current.mutateAsync({ meetingId, displayName: preferredDisplayName });
 
-        if (cancelled) {
-          stream.getTracks().forEach(track => track.stop());
-          return;
-        }
-
-        if (!result.participantId) {
-          throw new Error("Meeting join returned an invalid participant ID");
-        }
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return; }
+        if (!result.participantId) throw new Error("Meeting join returned an invalid participant ID");
 
         setParticipantId(result.participantId);
         setParticipantCount(1);
-
-        // Initialize WebSocket for signaling
         initializeSignaling(result.participantId, preferredDisplayName, localAudioEnabled, localVideoEnabled);
-
         setIsLoading(false);
       } catch (error) {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         console.error("Failed to initialize meeting:", error);
         toast.error("Failed to join meeting. Please try again.");
         setIsLoading(false);
@@ -622,22 +457,14 @@ export default function MeetingRoom() {
 
     initializationStartedRef.current = true;
     void initializeMeeting();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [
-    meetingId,
-    participantId,
-    setLocation,
-    attachLocalPreview,
-    startAudioMeter,
-    initializeSignaling,
-    handleRemoteStreamAdded,
-    handleRemoteStreamRemoved,
-    handleConnectionStateChanged,
+    meetingId, participantId, setLocation,
+    attachLocalPreview, startAudioMeter, initializeSignaling,
+    handleRemoteStreamAdded, handleRemoteStreamRemoved, handleConnectionStateChanged,
   ]);
 
+  // ── Cleanup on unmount ────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (localStreamRef.current) {
@@ -651,87 +478,48 @@ export default function MeetingRoom() {
     };
   }, []);
 
-  // Toggle audio
+  // ── Toggle audio ──────────────────────────────────────────────────────────
   const toggleAudio = async () => {
-    if (localStream) {
-      const newState = !audioEnabled;
-      localStream.getAudioTracks().forEach(track => {
-        track.enabled = newState;
-      });
-      setAudioEnabled(newState);
-      setMediaStatus(prev => ({
-        ...prev,
-        audioTrackEnabled: localStream.getAudioTracks().some(track => track.enabled),
-      }));
-      broadcastMediaState(newState, videoEnabled);
-
-      if (participantId) {
-        try {
-          await updateAudioMutation.mutateAsync({
-            participantId,
-            enabled: newState,
-          });
-        } catch (error) {
-          console.error("Failed to update audio state:", error);
-          toast.error("We couldn't sync your microphone state.");
-        }
-      }
+    if (!localStream) return;
+    const newState = !audioEnabled;
+    localStream.getAudioTracks().forEach(track => { track.enabled = newState; });
+    setAudioEnabled(newState);
+    setMediaStatus(prev => ({ ...prev, audioTrackEnabled: localStream.getAudioTracks().some(t => t.enabled) }));
+    broadcastMediaState(newState, videoEnabled);
+    if (participantId) {
+      try { await updateAudioMutation.mutateAsync({ participantId, enabled: newState }); }
+      catch (error) { console.error("Failed to update audio state:", error); toast.error("We couldn't sync your microphone state."); }
     }
   };
 
-  // Toggle video
+  // ── Toggle video ──────────────────────────────────────────────────────────
   const toggleVideo = async () => {
-    if (localStream) {
-      const newState = !videoEnabled;
-      localStream.getVideoTracks().forEach(track => {
-        track.enabled = newState;
-      });
-      setVideoEnabled(newState);
-      setMediaStatus(prev => ({
-        ...prev,
-        videoTrackEnabled: localStream.getVideoTracks().some(track => track.enabled),
-        videoTrackMuted: localStream.getVideoTracks()[0]?.muted ?? prev.videoTrackMuted,
-        videoTrackReadyState: localStream.getVideoTracks()[0]?.readyState ?? prev.videoTrackReadyState,
-      }));
-      void attachLocalPreview(localStream);
-      broadcastMediaState(audioEnabled, newState);
-
-      if (participantId) {
-        try {
-          await updateVideoMutation.mutateAsync({
-            participantId,
-            enabled: newState,
-          });
-        } catch (error) {
-          console.error("Failed to update video state:", error);
-          toast.error("We couldn't sync your camera state.");
-        }
-      }
+    if (!localStream) return;
+    const newState = !videoEnabled;
+    localStream.getVideoTracks().forEach(track => { track.enabled = newState; });
+    setVideoEnabled(newState);
+    setMediaStatus(prev => ({
+      ...prev,
+      videoTrackEnabled: localStream.getVideoTracks().some(t => t.enabled),
+      videoTrackMuted: localStream.getVideoTracks()[0]?.muted ?? prev.videoTrackMuted,
+      videoTrackReadyState: localStream.getVideoTracks()[0]?.readyState ?? prev.videoTrackReadyState,
+    }));
+    void attachLocalPreview(localStream);
+    broadcastMediaState(audioEnabled, newState);
+    if (participantId) {
+      try { await updateVideoMutation.mutateAsync({ participantId, enabled: newState }); }
+      catch (error) { console.error("Failed to update video state:", error); toast.error("We couldn't sync your camera state."); }
     }
   };
 
-  // Leave meeting
+  // ── Leave meeting ─────────────────────────────────────────────────────────
   const handleLeaveMeeting = async () => {
     try {
-      if (participantId) {
-        await leaveMeetingMutation.mutateAsync({
-          participantId,
-        });
-      }
-
+      if (participantId) await leaveMeetingMutation.mutateAsync({ participantId });
       setShowLeaveDialog(false);
-
-      // Close all peer connections
       webrtcManagerRef.current?.closeAll();
-
-      // Close WebSocket
       wsRef.current?.close();
-
-      // Stop all tracks
-      if (localStream) {
-        localStream.getTracks().forEach(track => track.stop());
-      }
-
+      if (localStream) localStream.getTracks().forEach(track => track.stop());
       setLocation("/");
     } catch (error) {
       console.error("Error leaving meeting:", error);
@@ -739,7 +527,7 @@ export default function MeetingRoom() {
     }
   };
 
-  // Copy meeting ID
+  // ── Copy meeting ID ───────────────────────────────────────────────────────
   const copyMeetingId = () => {
     navigator.clipboard.writeText(meetingId!);
     setCopiedMeetingId(true);
@@ -762,7 +550,7 @@ export default function MeetingRoom() {
   }
 
   const totalParticipants = Math.max(participantCount, participants.length + 1);
-  const remoteStreamsByParticipantId = new Map(remoteStreams.map(remote => [remote.participantId, remote]));
+  const remoteStreamsByParticipantId = new Map(remoteStreams.map(r => [r.participantId, r]));
 
   return (
     <div className="min-h-screen bg-slate-900 flex flex-col">
@@ -780,16 +568,8 @@ export default function MeetingRoom() {
             <div className="text-sm text-slate-400">
               ID: <code className="text-slate-200 font-mono text-xs">{meetingId}</code>
             </div>
-            <button
-              onClick={copyMeetingId}
-              className="p-2 hover:bg-slate-700 rounded-lg transition-colors"
-              title="Copy meeting ID"
-            >
-              {copiedMeetingId ? (
-                <Check className="w-5 h-5 text-green-400" />
-              ) : (
-                <Copy className="w-5 h-5 text-slate-400" />
-              )}
+            <button onClick={copyMeetingId} className="p-2 hover:bg-slate-700 rounded-lg transition-colors" title="Copy meeting ID">
+              {copiedMeetingId ? <Check className="w-5 h-5 text-green-400" /> : <Copy className="w-5 h-5 text-slate-400" />}
             </button>
           </div>
         </div>
@@ -797,7 +577,6 @@ export default function MeetingRoom() {
 
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
-        {/* Video Grid */}
         <div className="flex-1 flex flex-col">
           {showWhiteboard && (
             <div className="h-[60%] flex flex-col bg-white m-4 rounded-xl overflow-hidden shadow-2xl z-10 border border-slate-700">
@@ -806,47 +585,33 @@ export default function MeetingRoom() {
                   <Edit3 className="w-4 h-4 text-blue-600" />
                   Collaborative Whiteboard
                 </h3>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowWhiteboard(false)}
-                  className="text-slate-500 hover:text-slate-900"
-                >
+                <Button variant="ghost" size="sm" onClick={() => setShowWhiteboard(false)} className="text-slate-500 hover:text-slate-900">
                   Close
                 </Button>
               </div>
               <div className="flex-1 min-h-0">
-                <Whiteboard
-                  participantId={participantId || 0}
-                  socket={wsRef.current}
-                />
+                <Whiteboard participantId={participantId || 0} socket={wsRef.current} />
               </div>
             </div>
           )}
+
           <div className={`${showWhiteboard ? "h-[40%]" : "flex-1"} overflow-auto p-4 bg-slate-950 transition-all duration-300`}>
             <div className={`grid ${showWhiteboard ? "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4" : "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"} gap-4 auto-rows-max`}>
+
               {/* Local Video */}
               <Card className="border border-slate-700 bg-slate-800 overflow-hidden relative group aspect-video">
                 <video
                   ref={localVideoRef}
-                  autoPlay
-                  muted
-                  playsInline
-                  onLoadedMetadata={() => {
-                    void localVideoRef.current?.play?.();
-                  }}
+                  autoPlay muted playsInline
+                  onLoadedMetadata={() => { void localVideoRef.current?.play?.(); }}
                   className="w-full h-full object-cover bg-slate-900"
                   style={{ transform: "scaleX(-1)" }}
                 />
                 {!mediaStatus.hasVideoTrack && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-slate-300 text-sm">
-                    Camera not available
-                  </div>
+                  <div className="absolute inset-0 flex items-center justify-center bg-slate-900 text-slate-300 text-sm">Camera not available</div>
                 )}
                 {mediaStatus.hasVideoTrack && !mediaStatus.videoTrackEnabled && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-slate-300 text-sm">
-                    Camera is off
-                  </div>
+                  <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-slate-300 text-sm">Camera is off</div>
                 )}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent pointer-events-none" />
                 <div className="absolute bottom-0 left-0 right-0 p-3">
@@ -858,36 +623,17 @@ export default function MeetingRoom() {
                   <p className="text-slate-400 text-[11px]">
                     Video track: {mediaStatus.videoTrackReadyState}{mediaStatus.videoTrackMuted ? " / muted" : ""}
                   </p>
-                  {mediaStatus.videoTrackLabel && (
-                    <p className="text-slate-400 text-[11px] truncate">
-                      Camera device: {mediaStatus.videoTrackLabel}
-                    </p>
-                  )}
-                  {mediaStatus.audioTrackLabel && (
-                    <p className="text-slate-400 text-[11px] truncate">
-                      Mic device: {mediaStatus.audioTrackLabel}
-                    </p>
-                  )}
+                  {mediaStatus.videoTrackLabel && <p className="text-slate-400 text-[11px] truncate">Camera device: {mediaStatus.videoTrackLabel}</p>}
+                  {mediaStatus.audioTrackLabel && <p className="text-slate-400 text-[11px] truncate">Mic device: {mediaStatus.audioTrackLabel}</p>}
                   <div className="mt-2">
                     <div className="h-1.5 w-24 rounded-full bg-slate-700 overflow-hidden">
-                      <div
-                        className="h-full bg-emerald-400 transition-all"
-                        style={{ width: `${mediaStatus.audioTrackEnabled ? mediaStatus.audioLevel : 0}%` }}
-                      />
+                      <div className="h-full bg-emerald-400 transition-all" style={{ width: `${mediaStatus.audioTrackEnabled ? mediaStatus.audioLevel : 0}%` }} />
                     </div>
                     <p className="text-slate-400 text-[11px] mt-1">Mic activity</p>
                   </div>
                   <div className="flex gap-2 mt-2">
-                    {!audioEnabled && (
-                      <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1">
-                        <MicOff className="w-3 h-3" /> Muted
-                      </span>
-                    )}
-                    {!videoEnabled && (
-                      <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1">
-                        <VideoOff className="w-3 h-3" /> Camera Off
-                      </span>
-                    )}
+                    {!audioEnabled && <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1"><MicOff className="w-3 h-3" /> Muted</span>}
+                    {!videoEnabled && <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1"><VideoOff className="w-3 h-3" /> Camera Off</span>}
                   </div>
                 </div>
               </Card>
@@ -896,30 +642,16 @@ export default function MeetingRoom() {
               {participants.map(participant => {
                 const remoteStream = remoteStreamsByParticipantId.get(participant.id);
                 const shouldShowRemoteVideo = participant.videoEnabled && Boolean(remoteStream);
-
                 return (
-                  <Card
-                    key={participant.id}
-                    className="border border-slate-700 bg-slate-800 overflow-hidden relative group aspect-video"
-                  >
+                  <Card key={participant.id} className="border border-slate-700 bg-slate-800 overflow-hidden relative group aspect-video">
                     <video
-                      autoPlay
-                      playsInline
+                      autoPlay playsInline
                       className={`w-full h-full object-cover bg-slate-900 ${shouldShowRemoteVideo ? "opacity-100" : "opacity-0"}`}
-                      onLoadedMetadata={(event) => {
-                        void event.currentTarget.play().catch(error => {
-                          console.warn("Remote video autoplay was blocked:", error);
-                        });
-                      }}
+                      onLoadedMetadata={(e) => { void e.currentTarget.play().catch(err => console.warn("Remote video autoplay blocked:", err)); }}
                       ref={element => {
-                        if (!element) {
-                          return;
-                        }
-
+                        if (!element) return;
                         const nextStream = remoteStream?.stream ?? null;
-                        if (element.srcObject !== nextStream) {
-                          element.srcObject = nextStream;
-                        }
+                        if (element.srcObject !== nextStream) element.srcObject = nextStream;
                       }}
                     />
                     {!remoteStream && (
@@ -928,25 +660,15 @@ export default function MeetingRoom() {
                       </div>
                     )}
                     {remoteStream && !participant.videoEnabled && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-slate-300 text-sm">
-                        Camera is off
-                      </div>
+                      <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80 text-slate-300 text-sm">Camera is off</div>
                     )}
                     <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent pointer-events-none" />
                     <div className="absolute bottom-0 left-0 right-0 p-3">
                       <p className="text-white text-sm font-medium">{participant.displayName}</p>
                       <p className="text-slate-300 text-xs">{getConnectionLabel(participant.connectionState)}</p>
                       <div className="flex gap-2 mt-2">
-                        {!participant.audioEnabled && (
-                          <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1">
-                            <MicOff className="w-3 h-3" /> Muted
-                          </span>
-                        )}
-                        {!participant.videoEnabled && (
-                          <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1">
-                            <VideoOff className="w-3 h-3" /> Camera Off
-                          </span>
-                        )}
+                        {!participant.audioEnabled && <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1"><MicOff className="w-3 h-3" /> Muted</span>}
+                        {!participant.videoEnabled && <span className="text-xs bg-red-500/80 text-white px-2 py-1 rounded flex items-center gap-1"><VideoOff className="w-3 h-3" /> Camera Off</span>}
                       </div>
                     </div>
                   </Card>
@@ -958,43 +680,16 @@ export default function MeetingRoom() {
           {/* Control Bar */}
           <div className="border-t border-slate-700 bg-slate-800/50 backdrop-blur-sm px-4 py-4">
             <div className="max-w-7xl mx-auto flex items-center justify-center gap-4">
-              <Button
-                onClick={toggleAudio}
-                variant={audioEnabled ? "default" : "destructive"}
-                size="lg"
-                className="rounded-full w-14 h-14 p-0 flex items-center justify-center"
-                title={audioEnabled ? "Mute microphone" : "Unmute microphone"}
-              >
+              <Button onClick={toggleAudio} variant={audioEnabled ? "default" : "destructive"} size="lg" className="rounded-full w-14 h-14 p-0 flex items-center justify-center" title={audioEnabled ? "Mute microphone" : "Unmute microphone"}>
                 {audioEnabled ? <Mic className="w-6 h-6" /> : <MicOff className="w-6 h-6" />}
               </Button>
-
-              <Button
-                onClick={toggleVideo}
-                variant={videoEnabled ? "default" : "destructive"}
-                size="lg"
-                className="rounded-full w-14 h-14 p-0 flex items-center justify-center"
-                title={videoEnabled ? "Turn off camera" : "Turn on camera"}
-              >
+              <Button onClick={toggleVideo} variant={videoEnabled ? "default" : "destructive"} size="lg" className="rounded-full w-14 h-14 p-0 flex items-center justify-center" title={videoEnabled ? "Turn off camera" : "Turn on camera"}>
                 {videoEnabled ? <Video className="w-6 h-6" /> : <VideoOff className="w-6 h-6" />}
               </Button>
-
-              <Button
-                onClick={() => setShowWhiteboard(!showWhiteboard)}
-                variant={showWhiteboard ? "default" : "outline"}
-                size="lg"
-                className={`rounded-full w-14 h-14 p-0 flex items-center justify-center ${showWhiteboard ? "bg-blue-600 hover:bg-blue-700 border-blue-600" : "bg-white/10 hover:bg-white/20 border-white/20"}`}
-                title="Whiteboard"
-              >
+              <Button onClick={() => setShowWhiteboard(!showWhiteboard)} variant={showWhiteboard ? "default" : "outline"} size="lg" className={`rounded-full w-14 h-14 p-0 flex items-center justify-center ${showWhiteboard ? "bg-blue-600 hover:bg-blue-700 border-blue-600" : "bg-white/10 hover:bg-white/20 border-white/20"}`} title="Whiteboard">
                 <Edit3 className="w-6 h-6 text-white" />
               </Button>
-
-              <Button
-                onClick={() => setShowLeaveDialog(true)}
-                variant="destructive"
-                size="lg"
-                className="rounded-full w-14 h-14 p-0 flex items-center justify-center"
-                title="Leave meeting"
-              >
+              <Button onClick={() => setShowLeaveDialog(true)} variant="destructive" size="lg" className="rounded-full w-14 h-14 p-0 flex items-center justify-center" title="Leave meeting">
                 <Phone className="w-6 h-6" />
               </Button>
             </div>
@@ -1006,45 +701,24 @@ export default function MeetingRoom() {
           <div className="border-b border-slate-700 px-4 py-3 flex items-center gap-2">
             <Users className="w-5 h-5 text-blue-400" />
             <h2 className="text-white font-semibold">Participants</h2>
-            <span className="ml-auto text-xs bg-slate-700 text-slate-300 px-2 py-1 rounded-full">
-              {totalParticipants}
-            </span>
+            <span className="ml-auto text-xs bg-slate-700 text-slate-300 px-2 py-1 rounded-full">{totalParticipants}</span>
           </div>
           <div className="flex-1 overflow-auto p-3 space-y-2">
-            {/* Local participant */}
             <div className="bg-slate-700/50 border border-slate-600 rounded-lg p-3 hover:bg-slate-700/70 transition-colors">
               <p className="text-white text-sm font-medium truncate">{displayName}</p>
               <p className="text-slate-400 text-xs">You</p>
               <div className="flex gap-2 mt-2">
-                {audioEnabled ? (
-                  <Mic className="w-4 h-4 text-green-400" />
-                ) : (
-                  <MicOff className="w-4 h-4 text-red-400" />
-                )}
-                {videoEnabled ? (
-                  <Video className="w-4 h-4 text-green-400" />
-                ) : (
-                  <VideoOff className="w-4 h-4 text-red-400" />
-                )}
+                {audioEnabled ? <Mic className="w-4 h-4 text-green-400" /> : <MicOff className="w-4 h-4 text-red-400" />}
+                {videoEnabled ? <Video className="w-4 h-4 text-green-400" /> : <VideoOff className="w-4 h-4 text-red-400" />}
               </div>
             </div>
-
-            {/* Remote participants */}
             {participants.map(participant => (
               <div key={participant.id} className="bg-slate-700/50 border border-slate-600 rounded-lg p-3 hover:bg-slate-700/70 transition-colors">
                 <p className="text-white text-sm font-medium truncate">{participant.displayName}</p>
                 <p className="text-slate-400 text-xs mt-1">{getConnectionLabel(participant.connectionState)}</p>
                 <div className="flex gap-2 mt-2">
-                  {participant.audioEnabled ? (
-                    <Mic className="w-4 h-4 text-green-400" />
-                  ) : (
-                    <MicOff className="w-4 h-4 text-red-400" />
-                  )}
-                  {participant.videoEnabled ? (
-                    <Video className="w-4 h-4 text-green-400" />
-                  ) : (
-                    <VideoOff className="w-4 h-4 text-red-400" />
-                  )}
+                  {participant.audioEnabled ? <Mic className="w-4 h-4 text-green-400" /> : <MicOff className="w-4 h-4 text-red-400" />}
+                  {participant.videoEnabled ? <Video className="w-4 h-4 text-green-400" /> : <VideoOff className="w-4 h-4 text-red-400" />}
                 </div>
               </div>
             ))}
@@ -1052,7 +726,7 @@ export default function MeetingRoom() {
         </div>
       </main>
 
-      {/* Leave Meeting Dialog */}
+      {/* Leave Dialog */}
       <Dialog open={showLeaveDialog} onOpenChange={setShowLeaveDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
@@ -1062,20 +736,8 @@ export default function MeetingRoom() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex gap-3">
-            <Button
-              variant="outline"
-              onClick={() => setShowLeaveDialog(false)}
-              className="flex-1"
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleLeaveMeeting}
-              className="flex-1"
-            >
-              Leave
-            </Button>
+            <Button variant="outline" onClick={() => setShowLeaveDialog(false)} className="flex-1">Cancel</Button>
+            <Button variant="destructive" onClick={handleLeaveMeeting} className="flex-1">Leave</Button>
           </div>
         </DialogContent>
       </Dialog>
